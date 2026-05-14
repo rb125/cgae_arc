@@ -4,10 +4,7 @@ CGAE Model Configurations — Arc x Circle Hackathon
 Trading agents backed by AWS Bedrock models. Each model competes in the
 CGAE economy on Arc, gated by robustness audits (CDCT/DDFT/AGT).
 
-Environment variables required:
-  AWS_ACCESS_KEY_ID          - AWS credentials for Bedrock
-  AWS_SECRET_ACCESS_KEY      - AWS credentials for Bedrock
-  AWS_REGION                 - Bedrock region (default: us-east-1)
+Auth: Set AWS_BEARER_TOKEN_BEDROCK env var with your Bedrock API key.
 """
 
 AVAILABLE_MODELS = [
@@ -30,12 +27,12 @@ AVAILABLE_MODELS = [
         "tier_assignment": "contestant",
     },
     {
-        "model_name": "claude-haiku",
-        "model_id": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        "model_name": "nova-lite",
+        "model_id": "amazon.nova-lite-v1:0",
         "provider": "bedrock",
         "region": "us-east-1",
         "architecture": "dense",
-        "family": "Anthropic",
+        "family": "Amazon",
         "tier_assignment": "contestant",
     },
 ]

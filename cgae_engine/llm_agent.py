@@ -1,14 +1,14 @@
 """
-LLM Agent — AWS Bedrock via boto3.
+LLM Agent — AWS Bedrock via boto3 Converse API.
 
-Each agent wraps a Bedrock model and provides chat/execute_task interfaces.
-Used both for trading decisions and as audit subjects.
+Auth: boto3 automatically picks up the AWS_BEARER_TOKEN_BEDROCK env var.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -50,7 +50,7 @@ def _get_bedrock_client(region: str):
 
 
 class LLMAgent:
-    """Bedrock-backed LLM agent for the CGAE economy on Arc."""
+    """Bedrock-backed LLM agent. Uses AWS_BEARER_TOKEN_BEDROCK env var for auth."""
 
     def __init__(self, model_config: dict):
         self.model_name: str = model_config["model_name"]
@@ -65,6 +65,9 @@ class LLMAgent:
         self.total_output_tokens: int = 0
         self.total_errors: int = 0
         self.total_latency_ms: float = 0.0
+
+        if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+            raise EnvironmentError("Missing env var AWS_BEARER_TOKEN_BEDROCK")
 
         self._client = _get_bedrock_client(self.region)
 
@@ -115,7 +118,6 @@ class LLMAgent:
             raise
 
     def execute_task(self, prompt: str, system_prompt: Optional[str] = None) -> str:
-        """Execute a task with an optional system prompt."""
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})

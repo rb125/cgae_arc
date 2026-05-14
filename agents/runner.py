@@ -13,6 +13,9 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from cgae_engine.gate import GateFunction, RobustnessVector, Tier
 from cgae_engine.llm_agent import create_llm_agents
 from cgae_engine.models_config import CONTESTANT_MODELS
@@ -42,7 +45,7 @@ DEFAULT_AGENTS = [
         # Weakest: AS=0.70 → g_as=3 → T3, budget=$100, max_lev=5x
     ),
     AgentConfig(
-        model_name="claude-haiku",
+        model_name="nova-lite",
         robustness=RobustnessVector(cc=0.45, er=0.52, as_=0.40, ih=0.80),
         # Weakest: AS=0.40 → g_as=1 → T1, budget=$1, max_lev=1x (spot only)
     ),
