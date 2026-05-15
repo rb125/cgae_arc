@@ -1,5 +1,6 @@
 import { HardhatUserConfig } from "hardhat/config";
 import "@nomicfoundation/hardhat-toolbox";
+import "dotenv/config";
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -8,7 +9,8 @@ const config: HardhatUserConfig = {
   },
   networks: {
     arc: {
-      url: process.env.ARC_RPC_URL || "https://rpc.arc.network",
+      url: process.env.ARC_RPC_URL || "https://rpc.testnet.arc.network",
+      chainId: 5042002,
       accounts: process.env.ARC_PRIVATE_KEY ? [process.env.ARC_PRIVATE_KEY] : [],
     },
   },

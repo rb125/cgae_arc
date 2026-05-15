@@ -2,3 +2,4 @@ boto3==1.38.18
 requests==2.32.3
 web3==7.9.0
 python-dotenv==1.1.0
+rich==14.0.0

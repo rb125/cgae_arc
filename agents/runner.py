@@ -1,8 +1,11 @@
 """
-Trading Runner — Orchestrates multiple CGAE-gated trading agents.
+Portfolio Runner — Orchestrates the CGAE Adaptive Portfolio Manager demo.
 
-Fetches market data, runs each agent's decision loop, and tracks
-comparative performance across different robustness tiers.
+Flow:
+  1. Create sub-agents (RegimeDetector, Rebalancer, YieldOptimizer)
+  2. Run portfolio management cycles
+  3. Adversarial agent attacks each cycle — all blocked by CGAE
+  4. Display results
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+import urllib.request
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -19,175 +22,152 @@ load_dotenv()
 from cgae_engine.gate import GateFunction, RobustnessVector, Tier
 from cgae_engine.llm_agent import create_llm_agents
 from cgae_engine.models_config import CONTESTANT_MODELS
-from agents.trading import TradingAgent, MarketState, Signal
+from agents.portfolio import (
+    PortfolioOrchestrator, RegimeDetector, Rebalancer,
+    YieldOptimizer, SubAgent, Allocation, Regime,
+)
+from agents.adversarial import AdversarialAgent
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class AgentConfig:
-    """Configuration for a trading agent with its assigned robustness."""
-    model_name: str
-    robustness: RobustnessVector
-
-
-# Default agent configs — each model gets a different robustness profile
-# to demonstrate tier differentiation
-DEFAULT_AGENTS = [
-    AgentConfig(
-        model_name="nova-pro",
-        robustness=RobustnessVector(cc=0.55, er=0.60, as_=0.50, ih=0.85),
-        # Weakest: AS=0.50 → g_as=2 → T2, budget=$10, max_lev=3x
-    ),
-    AgentConfig(
-        model_name="claude-sonnet-4",
-        robustness=RobustnessVector(cc=0.82, er=0.78, as_=0.70, ih=0.92),
-        # Weakest: AS=0.70 → g_as=3 → T3, budget=$100, max_lev=5x
-    ),
-    AgentConfig(
-        model_name="nova-lite",
-        robustness=RobustnessVector(cc=0.45, er=0.52, as_=0.40, ih=0.80),
-        # Weakest: AS=0.40 → g_as=1 → T1, budget=$1, max_lev=1x (spot only)
-    ),
-]
-
-
-def fetch_market_data(symbol: str = "ETH-PERP") -> MarketState:
-    """
-    Fetch live market data. For the hackathon demo, uses a simple
-    price feed. Replace with actual DEX/CEX API in production.
-    """
-    import urllib.request
-
+def fetch_market_data() -> dict:
+    """Fetch live market data for regime detection."""
     try:
-        # CoinGecko free API for ETH price
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd&include_24hr_change=true"
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,bitcoin&vs_currencies=usd&include_24hr_change=true"
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-        price = data["ethereum"]["usd"]
-        change_24h = data["ethereum"].get("usd_24h_change", 0) / 100
-
-        return MarketState(
-            symbol=symbol,
-            price=price,
-            price_24h_ago=price / (1 + change_24h),
-            funding_rate=0.0001,  # placeholder — would come from perps DEX
-            volatility_24h=abs(change_24h) * 2,  # rough estimate
-            volume_24h=5_000_000_000,
-            open_interest=2_000_000_000,
-        )
+        return {
+            "eth_change_24h": data["ethereum"].get("usd_24h_change", 0),
+            "btc_change_24h": data["bitcoin"].get("usd_24h_change", 0),
+            "volatility": abs(data["ethereum"].get("usd_24h_change", 0)) * 0.5,
+            "funding_rate": 0.01,
+            "fear_greed": 55,
+        }
     except Exception as e:
-        logger.warning(f"Market data fetch failed: {e}, using defaults")
-        return MarketState(
-            symbol=symbol,
-            price=3500.0,
-            price_24h_ago=3450.0,
-            funding_rate=0.0001,
-            volatility_24h=0.03,
-            volume_24h=5_000_000_000,
-            open_interest=2_000_000_000,
-        )
+        logger.warning(f"Market data fetch failed: {e}")
+        return {"eth_change_24h": 1.5, "btc_change_24h": 0.8, "volatility": 3.0, "funding_rate": 0.01, "fear_greed": 55}
 
 
-def run_trading_round(
-    agents: list[TradingAgent],
-    market: Optional[MarketState] = None,
-) -> list[dict]:
-    """Run one trading round for all agents."""
-    if market is None:
-        market = fetch_market_data()
-
-    results = []
-    for agent in agents:
-        agent.update_unrealized_pnl(market.price)
-        decision = agent.decide(market)
-        result = agent.execute(decision, market)
-        result["market"] = {"symbol": market.symbol, "price": market.price}
-        results.append(result)
-        logger.info(
-            f"[{agent.llm.model_name}] T{agent.tier.value} | "
-            f"{result['action']} | {decision.signal.value} "
-            f"(conf={decision.confidence:.2f}) | PnL=${agent.total_pnl:.2f}"
-        )
-
-    return results
-
-
-def create_trading_agents(
-    agent_configs: Optional[list[AgentConfig]] = None,
-) -> list[TradingAgent]:
-    """Create trading agents from configs, gating each by its robustness."""
-    configs = agent_configs or DEFAULT_AGENTS
+def create_portfolio_system() -> tuple[PortfolioOrchestrator, AdversarialAgent]:
+    """Create the full portfolio system with all sub-agents."""
     gate = GateFunction()
+    models = {m["model_name"]: m for m in CONTESTANT_MODELS}
+    llm_agents = create_llm_agents(list(models.values()))
 
-    # Create LLM backends
-    model_configs = {m["model_name"]: m for m in CONTESTANT_MODELS}
-    llm_agents = create_llm_agents(
-        [model_configs[c.model_name] for c in configs if c.model_name in model_configs]
+    # Assign roles to models
+    # claude-sonnet-4 → Rebalancer (needs highest reasoning for allocation decisions)
+    # nova-pro → Regime Detector (fast, good at classification)
+    # nova-lite → Yield Optimizer (simple task, low tier is fine)
+
+    regime_robustness = RobustnessVector(cc=0.55, er=0.60, as_=0.50, ih=0.85)
+    rebalancer_robustness = RobustnessVector(cc=0.82, er=0.78, as_=0.70, ih=0.92)
+    yield_robustness = RobustnessVector(cc=0.52, er=0.55, as_=0.48, ih=0.82)
+
+    regime_detector = RegimeDetector(
+        name="nova-pro", role="regime_detector",
+        llm=llm_agents["nova-pro"],
+        tier=gate.evaluate(regime_robustness),
+        robustness=regime_robustness,
+    ) if "nova-pro" in llm_agents else None
+
+    rebalancer = Rebalancer(
+        name="claude-sonnet-4", role="rebalancer",
+        llm=llm_agents["claude-sonnet-4"],
+        tier=gate.evaluate(rebalancer_robustness),
+        robustness=rebalancer_robustness,
+    ) if "claude-sonnet-4" in llm_agents else None
+
+    yield_optimizer = YieldOptimizer(
+        name="nova-lite", role="yield_optimizer",
+        llm=llm_agents.get("nova-lite", llm_agents.get("nova-pro")),
+        tier=gate.evaluate(yield_robustness),
+        robustness=yield_robustness,
+    ) if llm_agents else None
+
+    if not all([regime_detector, rebalancer, yield_optimizer]):
+        raise RuntimeError("Could not create all sub-agents. Check AWS credentials.")
+
+    orchestrator = PortfolioOrchestrator(
+        regime_detector=regime_detector,
+        rebalancer=rebalancer,
+        yield_optimizer=yield_optimizer,
+        tier=Tier.T4,  # Orchestrator has highest tier
     )
 
-    trading_agents = []
-    for config in configs:
-        if config.model_name not in llm_agents:
-            continue
-        tier = gate.evaluate(config.robustness)
-        agent = TradingAgent(
-            llm=llm_agents[config.model_name],
-            tier=tier,
-            robustness=config.robustness,
-        )
-        logger.info(
-            f"Created trading agent: {config.model_name} → "
-            f"T{tier.value} (budget=${agent.budget_ceiling}, lev={agent.max_leverage}x)"
-        )
-        trading_agents.append(agent)
+    adversary = AdversarialAgent()
 
-    return trading_agents
+    return orchestrator, adversary
 
 
-def run_demo(rounds: int = 3, interval: int = 10):
-    """Run a multi-round trading demo with all agents."""
+def run_demo(rounds: int = 2, interval: int = 5):
+    """Run the full portfolio management demo with adversary attacks."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    print("=" * 60)
-    print("CGAE Perps Trading Agent — Arc x Circle Hackathon")
-    print("=" * 60)
+    print("=" * 65)
+    print("  CGAE Adaptive Portfolio Manager — Arc × Circle (RFB 04)")
+    print("=" * 65)
 
-    agents = create_trading_agents()
-    if not agents:
-        print("No agents created. Check AWS credentials.")
-        return
+    orchestrator, adversary = create_portfolio_system()
 
-    print(f"\n{'Model':<20} {'Tier':<5} {'Budget':<10} {'Max Lev':<8}")
-    print("-" * 43)
-    for a in agents:
-        print(f"{a.llm.model_name:<20} T{a.tier.value:<4} ${a.budget_ceiling:<9} {a.max_leverage}x")
+    # Print agent roster
+    print(f"\n{'─' * 65}")
+    print("  AGENT ROSTER")
+    print(f"{'─' * 65}")
+    agents = [
+        ("Orchestrator", "coordinator", Tier.T4),
+        (orchestrator.regime_detector.name, "regime_detector", orchestrator.regime_detector.tier),
+        (orchestrator.rebalancer.name, "rebalancer", orchestrator.rebalancer.tier),
+        (orchestrator.yield_optimizer.name, "yield_optimizer", orchestrator.yield_optimizer.tier),
+        ("adversary", "adversarial", adversary.tier),
+    ]
+    print(f"  {'Agent':<20} {'Role':<18} {'Tier':<5} {'Budget':<10}")
+    print(f"  {'-'*53}")
+    for name, role, tier in agents:
+        budget = f"${GateFunction().budget_ceiling(tier)}"
+        print(f"  {name:<20} {role:<18} T{tier.value:<4} {budget}")
 
-    all_results = []
+    # Run cycles
     for i in range(rounds):
-        print(f"\n{'─' * 60}")
-        print(f"Round {i + 1}/{rounds}")
-        print(f"{'─' * 60}")
+        print(f"\n{'═' * 65}")
+        print(f"  CYCLE {i+1}/{rounds}")
+        print(f"{'═' * 65}")
 
-        results = run_trading_round(agents)
-        all_results.extend(results)
+        # Portfolio management
+        print(f"\n  📈 Portfolio Management")
+        print(f"  {'─' * 40}")
+        market = fetch_market_data()
+        result = orchestrator.run_cycle(market)
+
+        # Adversary attacks
+        print(f"\n  🔴 Adversary Attacks")
+        print(f"  {'─' * 40}")
+        attacks = adversary.run_all_attacks()
+        for attack in attacks:
+            status = "⛔ BLOCKED" if attack.blocked else "⚠️  PASSED"
+            print(f"  {status}: {attack.attack_type.value}")
+            print(f"    └─ {attack.description}")
 
         if i < rounds - 1:
             time.sleep(interval)
 
-    # Summary
-    print(f"\n{'═' * 60}")
-    print("FINAL SUMMARY")
-    print(f"{'═' * 60}")
-    for a in agents:
-        s = a.summary()
-        print(f"\n{s['model']} (T{a.tier.value}):")
-        print(f"  PnL: ${s['total_pnl']:.2f} | Trades: {s['trades']}")
-        print(f"  LLM calls: {s['llm_usage']['total_calls']} | "
-              f"Avg latency: {s['llm_usage']['avg_latency_ms']:.0f}ms")
+    # Final summary
+    print(f"\n{'═' * 65}")
+    print("  FINAL STATE")
+    print(f"{'═' * 65}")
+    ps = orchestrator.summary()
+    print(f"\n  Portfolio: ${ps['aum']:.2f} AUM | Regime: {ps['regime']}")
+    print(f"  Allocation: ETH={ps['allocation']['eth']:.0f}% BTC={ps['allocation']['btc']:.0f}% "
+          f"USDC={ps['allocation']['usdc']:.0f}% USYC={ps['allocation']['usyc']:.0f}%")
+    print(f"  Delegations: {ps['total_delegations']} | Blocks: {ps['total_blocks']}")
 
-    return all_results
+    adv = adversary.summary()
+    print(f"\n  Adversary: {adv['blocked']}/{adv['total_attacks']} attacks blocked "
+          f"({(1-adv['success_rate'])*100:.0f}% defense rate)")
+    print(f"  Theorems enforced: {', '.join(set(a['theorem'][:20]+'...' for a in adv['attacks']))}")
+
+    return {"portfolio": ps, "adversary": adv}
 
 
 if __name__ == "__main__":

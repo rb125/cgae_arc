@@ -1,2 +1,3 @@
-from agents.trading import TradingAgent, MarketState, Signal, TradeDecision
-from agents.runner import create_trading_agents, run_trading_round, run_demo
+from agents.portfolio import PortfolioOrchestrator, RegimeDetector, Rebalancer, YieldOptimizer
+from agents.adversarial import AdversarialAgent
+from agents.runner import run_demo
