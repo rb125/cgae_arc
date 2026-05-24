@@ -22,6 +22,7 @@ from typing import Optional
 
 from cgae_engine.gate import GateFunction, RobustnessVector, Tier, DEFAULT_BUDGET_CEILINGS
 from cgae_engine.llm_agent import LLMAgent
+from nanopayments import NanopaymentClient, Payment
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,7 @@ class PortfolioOrchestrator:
         self.yield_optimizer = yield_optimizer
         self.tier = tier
         self.gate = GateFunction()
+        self.payments = NanopaymentClient(budget_ceiling=DEFAULT_BUDGET_CEILINGS[tier])
         self.state = PortfolioState(
             aum_usdc=100.0,
             allocation=Allocation(eth_pct=30, btc_pct=20, usdc_pct=30, usyc_pct=20),
@@ -212,7 +214,7 @@ class PortfolioOrchestrator:
 
     def delegate(self, to_agent: SubAgent, action: str, min_tier: int) -> bool:
         """
-        Enforce delegation chain constraint (Definition 14).
+        Enforce delegation chain constraint (Definition 14) and pay via x402.
         Chain tier = min(orchestrator_tier, sub_agent_tier) >= required tier.
         """
         chain_tier = min(self.tier.value, to_agent.tier.value)
@@ -234,7 +236,16 @@ class PortfolioOrchestrator:
                 f"  ⛔ BLOCKED: {action} via {to_agent.name} "
                 f"(chain T{chain_tier} < required T{min_tier})"
             )
-        return allowed
+            return False
+
+        # Pay sub-agent via x402 nanopayment (bounded by tier budget)
+        payment = self.payments.pay_for_action(to_agent.name, action)
+        if payment.status == "blocked":
+            record.allowed = False
+            record.reason = "Budget ceiling exhausted"
+            return False
+
+        return True
 
     def run_cycle(self, market_data: dict) -> dict:
         """Run one portfolio management cycle."""
@@ -311,4 +322,5 @@ class PortfolioOrchestrator:
             },
             "total_delegations": len(self.delegation_log),
             "total_blocks": len(self.blocked_actions),
+            "payments": self.payments.get_balance(),
         }

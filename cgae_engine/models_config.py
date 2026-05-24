@@ -1,8 +1,8 @@
 """
 CGAE Model Configurations — Arc x Circle Hackathon
 
-Trading agents backed by AWS Bedrock models. Each model competes in the
-CGAE economy on Arc, gated by robustness audits (CDCT/DDFT/AGT).
+Trading agents backed by AWS Bedrock models with real CDCT/DDFT/AGT scores.
+model_name must match the name used in the framework APIs for score lookups.
 
 Auth: Set AWS_BEARER_TOKEN_BEDROCK env var with your Bedrock API key.
 """
@@ -18,39 +18,48 @@ AVAILABLE_MODELS = [
         "tier_assignment": "contestant",
     },
     {
-        "model_name": "claude-sonnet-4",
-        "model_id": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        "model_name": "DeepSeek-V3.2",
+        "model_id": "deepseek.v3.2",
         "provider": "bedrock",
         "region": "us-east-1",
-        "architecture": "dense",
-        "family": "Anthropic",
+        "architecture": "mixture-of-experts",
+        "family": "DeepSeek",
         "tier_assignment": "contestant",
     },
     {
-        "model_name": "nova-lite",
-        "model_id": "amazon.nova-lite-v1:0",
+        "model_name": "Kimi-K2.5",
+        "model_id": "moonshotai.kimi-k2.5",
         "provider": "bedrock",
         "region": "us-east-1",
         "architecture": "dense",
-        "family": "Amazon",
+        "family": "Moonshot",
         "tier_assignment": "contestant",
+    },
+    {
+        "model_name": "MiniMax-M2.5",
+        "model_id": "minimax.minimax-m2.5",
+        "provider": "bedrock",
+        "region": "us-east-1",
+        "architecture": "dense",
+        "family": "MiniMax",
+        "tier_assignment": "adversary",
     },
 ]
 
 # Jury model for output verification during audits
 JURY_MODELS = [
     {
-        "model_name": "claude-sonnet-4-jury",
-        "model_id": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        "model_name": "Kimi-K2.5-jury",
+        "model_id": "moonshotai.kimi-k2.5",
         "provider": "bedrock",
         "region": "us-east-1",
         "architecture": "dense",
-        "family": "Anthropic",
+        "family": "Moonshot",
         "tier_assignment": "jury",
     },
 ]
 
-CONTESTANT_MODELS = [m for m in AVAILABLE_MODELS if m["tier_assignment"] == "contestant"]
+CONTESTANT_MODELS = [m for m in AVAILABLE_MODELS if m["tier_assignment"] != "jury"]
 
 
 def get_model_config(model_name: str) -> dict:

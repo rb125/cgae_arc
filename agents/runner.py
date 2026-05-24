@@ -22,6 +22,7 @@ load_dotenv()
 from cgae_engine.gate import GateFunction, RobustnessVector, Tier
 from cgae_engine.llm_agent import create_llm_agents
 from cgae_engine.models_config import CONTESTANT_MODELS
+from cgae_engine.audit import AuditOrchestrator
 from agents.portfolio import (
     PortfolioOrchestrator, RegimeDetector, Rebalancer,
     YieldOptimizer, SubAgent, Allocation, Regime,
@@ -56,35 +57,42 @@ def create_portfolio_system() -> tuple[PortfolioOrchestrator, AdversarialAgent]:
     models = {m["model_name"]: m for m in CONTESTANT_MODELS}
     llm_agents = create_llm_agents(list(models.values()))
 
-    # Assign roles to models
-    # claude-sonnet-4 → Rebalancer (needs highest reasoning for allocation decisions)
-    # nova-pro → Regime Detector (fast, good at classification)
-    # nova-lite → Yield Optimizer (simple task, low tier is fine)
+    # Fetch real robustness scores from framework APIs where available
+    orchestrator_audit = AuditOrchestrator()
+    agent_scores = {}
+    for name in ["nova-pro", "DeepSeek-V3.2", "Kimi-K2.5", "MiniMax-M2.5"]:
+        result = orchestrator_audit.audit_from_results(name, name)
+        agent_scores[name] = result.robustness
+        defaults = result.defaults_used
+        tier = gate.evaluate(result.robustness)
+        logger.info(f"  {name}: CC={result.robustness.cc:.3f} ER={result.robustness.er:.3f} "
+                    f"AS={result.robustness.as_:.3f} IH={result.robustness.ih:.3f} → T{tier.value}"
+                    f"{' (defaults: ' + ','.join(defaults) + ')' if defaults else ''}")
 
-    regime_robustness = RobustnessVector(cc=0.55, er=0.60, as_=0.50, ih=0.85)
-    rebalancer_robustness = RobustnessVector(cc=0.82, er=0.78, as_=0.70, ih=0.92)
-    yield_robustness = RobustnessVector(cc=0.52, er=0.55, as_=0.48, ih=0.82)
+    regime_r = agent_scores["nova-pro"]
+    rebal_r = agent_scores["Kimi-K2.5"]
+    yield_r = agent_scores["DeepSeek-V3.2"]
 
     regime_detector = RegimeDetector(
         name="nova-pro", role="regime_detector",
         llm=llm_agents["nova-pro"],
-        tier=gate.evaluate(regime_robustness),
-        robustness=regime_robustness,
+        tier=gate.evaluate(regime_r),
+        robustness=regime_r,
     ) if "nova-pro" in llm_agents else None
 
     rebalancer = Rebalancer(
-        name="claude-sonnet-4", role="rebalancer",
-        llm=llm_agents["claude-sonnet-4"],
-        tier=gate.evaluate(rebalancer_robustness),
-        robustness=rebalancer_robustness,
-    ) if "claude-sonnet-4" in llm_agents else None
+        name="Kimi-K2.5", role="rebalancer",
+        llm=llm_agents["Kimi-K2.5"],
+        tier=gate.evaluate(rebal_r),
+        robustness=rebal_r,
+    ) if "Kimi-K2.5" in llm_agents else None
 
     yield_optimizer = YieldOptimizer(
-        name="nova-lite", role="yield_optimizer",
-        llm=llm_agents.get("nova-lite", llm_agents.get("nova-pro")),
-        tier=gate.evaluate(yield_robustness),
-        robustness=yield_robustness,
-    ) if llm_agents else None
+        name="DeepSeek-V3.2", role="yield_optimizer",
+        llm=llm_agents["DeepSeek-V3.2"],
+        tier=gate.evaluate(yield_r),
+        robustness=yield_r,
+    ) if "DeepSeek-V3.2" in llm_agents else None
 
     if not all([regime_detector, rebalancer, yield_optimizer]):
         raise RuntimeError("Could not create all sub-agents. Check AWS credentials.")
@@ -96,7 +104,10 @@ def create_portfolio_system() -> tuple[PortfolioOrchestrator, AdversarialAgent]:
         tier=Tier.T4,  # Orchestrator has highest tier
     )
 
-    adversary = AdversarialAgent()
+    # MiniMax-M2.5 as adversary — uses its real (low) robustness scores
+    minimax_r = agent_scores["MiniMax-M2.5"]
+    minimax_tier = gate.evaluate(minimax_r)
+    adversary = AdversarialAgent(tier=minimax_tier, robustness=minimax_r)
 
     return orchestrator, adversary
 
@@ -161,6 +172,12 @@ def run_demo(rounds: int = 2, interval: int = 5):
     print(f"  Allocation: ETH={ps['allocation']['eth']:.0f}% BTC={ps['allocation']['btc']:.0f}% "
           f"USDC={ps['allocation']['usdc']:.0f}% USYC={ps['allocation']['usyc']:.0f}%")
     print(f"  Delegations: {ps['total_delegations']} | Blocks: {ps['total_blocks']}")
+
+    pay = ps.get("payments", {})
+    if pay:
+        print(f"\n  💸 Nanopayments (x402 via Gateway):")
+        print(f"     Spent: ${pay.get('spent', 0):.4f} / ${pay.get('budget_ceiling', 0)} ceiling")
+        print(f"     Payments: {pay.get('payments_made', 0)} made, {pay.get('payments_blocked', 0)} blocked")
 
     adv = adversary.summary()
     print(f"\n  Adversary: {adv['blocked']}/{adv['total_attacks']} attacks blocked "
